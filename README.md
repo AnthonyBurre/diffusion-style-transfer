@@ -1,14 +1,32 @@
 # Diffusion-based artistic style transfer
 
-A Gradio web app for image-to-image artistic style transfer using diffusion models. Sibling project to [`image-style-transfer`](../image-style-transfer) — same UX, much higher style fidelity, fundamentally different deployment requirements (GPU + ~15 GB of model weights).
+A Gradio web app for image-to-image artistic style transfer using diffusion models. Sibling project to [`image-style-transfer`](https://github.com/AnthonyBurre/image-style-transfer) — same UX, fundamentally different approach and system requirements (GPU + ~15 GB of model weights).
 
-## Why this exists
+Stable Diffusion XL (SDXL) needs ~12 GB VRAM and tens of seconds per image even on a recent GPU. This project assumes a CUDA-capable GPU (or Apple Silicon MPS as a slower fallback).
 
-The sibling ships three statistic-matching methods (Magenta, Gatys, StyTr²). All three lose absolute tonality (e.g. true blacks in both content and style fail to survive into the output) because their style losses match feature mean and std, which are invariant to absolute pixel intensity. Diffusion methods sidestep this: they generate from noise conditioned on the content + style images, with no feature-statistic loss in the loop.
+## Run with Docker (CUDA)
 
-The cost is hardware. SDXL needs ~12 GB VRAM and tens of seconds per image even on a recent GPU; CPU inference is impractical. This project assumes a CUDA-capable GPU (or Apple Silicon MPS as a slower fallback).
+**Linux host with an NVIDIA GPU only.** `--gpus all` requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/), which is Linux-only — Docker Desktop on macOS and Windows runs containers inside a VM that has no GPU passthrough. 
+
+```shell
+docker build -t style-transfer-diffusion .
+docker run --rm --gpus all -p 7860:7860 \
+  -v $HOME/.cache/huggingface:/app/.cache/huggingface \
+  style-transfer-diffusion
+```
+
+## Run on the host
+
+On a Mac (including Apple Silicon), skip Docker and use the host instructions below; MPS is detected automatically.
+
+```shell
+.venv/bin/python -m src.app
+```
 
 ## Background
+
+My last image style transfer project produced some interesting results using three statistic-matching methods (Magenta, Gatys, StyTr²), but failed to fully realize the potential of style transfer. Diffusion methods are the next approach to investigate.
+
 
 ### Forward and reverse diffusion
 
@@ -58,30 +76,8 @@ A diffusion sampling loop (~30 steps) generates the final image. An optional tex
 
 Disk: **~15 GB** for cached models on first run.
 
-## Run with Docker (CUDA)
-
-Requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/) on the host.
-
-```shell
-docker build -t style-transfer-diffusion .
-docker run --rm --gpus all -p 7860:7860 \
-  -v $HOME/.cache/huggingface:/app/.cache/huggingface \
-  style-transfer-diffusion
-```
-
-The volume mount avoids re-downloading ~15 GB on every container start.
-
-## Run on the host
-
-```shell
-.venv/bin/python -m src.app
-```
-
-Apple Silicon: identical command. MPS is detected automatically.
 
 ## Architecture
-
-Two-layer split, mirroring the sibling project:
 
 - `src/app.py` — Gradio `Interface`. Inputs: content image, style image, optional prompt, ControlNet variant (depth/canny), advanced controls (IP-Adapter weight, ControlNet conditioning scale, num inference steps, guidance scale, seed). Output: stylised image.
 - `src/pipeline.py` — Builds the `StableDiffusionXLControlNetPipeline`, loads InstantStyle weights, applies the depth/canny preprocessor, runs inference. **Lazy-loaded** — first call triggers ~15 GB of Hugging Face Hub downloads and a few seconds of CUDA init.
@@ -91,46 +87,7 @@ Two-layer split, mirroring the sibling project:
 
 All weights live in the standard Hugging Face Hub cache (`$HF_HOME` or `~/.cache/huggingface/hub`). The Docker image deliberately does **not** bake them in (would push the image past ~20 GB). First-run download takes 5–15 minutes depending on network. In production, mount the host cache as a volume so subsequent container starts are instant.
 
-### Container
-
-Base image: `nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04`. Runs as non-root `appuser`. `HEALTHCHECK` hits `http://127.0.0.1:7860/`. `start-period` is **300 s** (vs. 60 s in the sibling project) because cold start covers CUDA init, first-inference torch compile, and first model load.
-
-## Repository structure
-
-```
-.
-├── Dockerfile
-├── README.md
-├── CLAUDE.md
-├── requirements.txt
-├── .dockerignore
-├── examples/
-│   ├── content.jpg
-│   └── style.jpg
-└── src/
-    ├── app.py            # Gradio UI
-    ├── pipeline.py       # diffusers pipeline + inference
-    └── image_utils.py    # PIL preprocessing
-```
-
-## Dependencies
-
-Pin exact versions once the first end-to-end run succeeds. Starting set:
-
-```
-gradio
-torch                  # CUDA wheel via --extra-index-url https://download.pytorch.org/whl/cu124
-torchvision
-diffusers              # the pipeline framework
-transformers           # required by diffusers (CLIP text/image encoders)
-accelerate             # memory-efficient loading + offload helpers
-huggingface_hub        # weight downloads
-controlnet-aux         # depth / canny preprocessors
-peft                   # required for IP-Adapter / InstantStyle weight loading
-pillow
-numpy
-safetensors
-```
+The volume mount avoids re-downloading ~15 GB on every container start.
 
 ## Defaults and rationale
 
@@ -143,9 +100,9 @@ Decisions that were close calls, recorded so the rationale doesn't have to be re
 - **UI surface: presets in front, raw knobs behind.** The default UI exposes 2–3 named presets (*follow content closely* / *balanced* / *maximum style*) which map to fixed combinations of IP-Adapter weight and ControlNet conditioning scale. IP-Adapter weight, conditioning scale, step count, guidance scale and seed are accessible behind a collapsible **Advanced** panel.
 - **Negative prompt: hard-coded default, user-overridable.** SDXL responds well to a generic negative prompt; the default is `"blurry, low quality, distorted"`. The textbox is editable, including down to empty.
 
-## Roadmap (after first working build)
+## Roadmap
 
-In rough priority order:
+In no particular order:
 
 1. **Per-style LoRA fine-tuning** — a separate training script that trains a LoRA on 10–50 images of a target style, saved into `loras/<style-name>.safetensors`, selectable from the UI. The highest-fidelity path when the goal is matching a specific artist or hand.
 2. **Refiner stage** — SDXL ships a refiner model that improves fine detail. Adds ~3 GB but visibly better edges/textures.
