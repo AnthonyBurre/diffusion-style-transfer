@@ -1,12 +1,12 @@
 # Diffusion-based artistic style transfer
 
-A Gradio web app for image-to-image artistic style transfer using diffusion models. Sibling project to [`image-style-transfer`](https://github.com/AnthonyBurre/image-style-transfer) — same UX, fundamentally different approach and system requirements (GPU + ~15 GB of model weights).
+A Gradio web app for image-to-image artistic style transfer using diffusion models. Sibling project to [`image-style-transfer`](https://github.com/AnthonyBurre/image-style-transfer) - same UX, fundamentally different approach and system requirements (GPU + ~15 GB of model weights).
 
 Stable Diffusion XL (SDXL) is comfortable with ~12 GB VRAM and takes tens of seconds per image even on a recent GPU. This project assumes a CUDA-capable GPU (or Apple Silicon MPS as a slower fallback).
 
 ## Run with Docker (CUDA)
 
-**Linux, or Windows via WSL2 — both with an NVIDIA GPU.** `--gpus all` requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/), which is supported on Linux and inside WSL2 (NVIDIA exposes CUDA into the WSL2 VM). Docker Desktop on macOS runs containers inside a VM with no GPU passthrough.
+**Linux, or Windows via WSL2 - both with an NVIDIA GPU.** `--gpus all` requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/), which is supported on Linux and inside WSL2 (NVIDIA exposes CUDA into the WSL2 VM). Docker Desktop on macOS runs containers inside a VM with no GPU passthrough.
 
 ```shell
 docker build -t style-transfer-diffusion .
@@ -35,28 +35,29 @@ On Apple Silicon the default PyPI index is correct and MPS is detected automatic
 
 My last image style transfer project produced some interesting results using three statistic-matching methods (Magenta, Gatys, StyTr²), but failed to fully realize the potential of style transfer. Diffusion methods are the next approach to investigate.
 
+For the mechanics of forward/reverse diffusion:
 
-### Forward and reverse diffusion
+| Title | Author | Content |
+|---|---|---|
+| [Diffusion model](https://en.wikipedia.org/wiki/Diffusion_model) | Wikipedia | General overview of the model family with pointers to the major variants and original papers. |
+| [The Annotated Diffusion Model](https://huggingface.co/blog/annotated-diffusion) | Niels Rogge and Kashif Rasul | Walkthrough of a minimal diffusion model implementation in PyTorch line by line. |
+| [What are Diffusion Models?](https://lilianweng.github.io/posts/2021-07-11-diffusion-models/) | Lilian Weng | Very mathematical long-form derivation of the forward/reverse process, score matching, and DDPM/DDIM sampling. |
 
-A diffusion model is trained on a corruption process. Take a real image, add a tiny bit of Gaussian noise, add another tiny bit, repeat for ~1000 steps; by the end the image is indistinguishable from pure noise. A neural network is then trained on the inverse task: given a noisy image at step *t*, predict the noise that was added on the way in. With hundreds of millions of image–text pairs as training data, the network ends up implicitly modelling the statistical structure of natural images.
 
-Inference runs the process in reverse. Start from pure Gaussian noise, ask the network "what noise is in this?", subtract a small fraction of the prediction, and repeat for ~30–50 steps. Each step nudges the sample toward something the network considers plausible, so the noise gradually resolves into a coherent image. Nothing is being looked up or copied — the network has learned what natural images look like well enough that it can sculpt noise into one.
 
 ### Conditioning
 
-The original conditioning signal is text. Stable Diffusion, DALL-E, Imagen and similar systems are primarily text-to-image models: at every denoising step the network reads a CLIP-style text embedding and steers the prediction toward an image consistent with the prompt.
+Stable Diffusion is primarily a text-to-image model: at every denoising step the network reads a CLIP-style text embedding and steers toward an image consistent with the prompt. Image conditioning was added later as adapter modules. ControlNet adds a parallel branch that consumes a spatial control signal - a depth map or an edge map - and injects it into the U-Net's residual blocks. IP-Adapter (and its style-specialised variant InstantStyle) extracts CLIP image features from a reference image and feeds them through learned cross-attention layers. Both are translators that convert images into the same kind of conditioning vector the network already knows how to listen to.
 
-Image conditioning was added later as adapter modules on top of already-trained text-to-image models. ControlNet adds a parallel branch that consumes a spatial control signal — a depth map or an edge map — and injects it into the U-Net's residual blocks. IP-Adapter (and its style-specialised variant InstantStyle) extracts CLIP image features from a reference image and feeds them through learned cross-attention layers. Mechanically, both are translators that convert images into the same kind of conditioning vector the network already knows how to listen to.
+In this pipeline three conditioning signals - the optional text prompt, the depth map of the content image, and the InstantStyle features of the style image - pull on every one of the ~30 denoising steps simultaneously.
 
-In this pipeline three conditioning signals — the optional text prompt, the depth map of the content image, and the InstantStyle features of the style image — pull on every one of the ~30 denoising steps simultaneously.
-
-A useful side effect of generating rather than editing: tonal extremes survive. The statistic-matching methods in the sibling project (Magenta, Gatys, StyTr²) match Gram matrices and channel-wise mean/std, both invariant to absolute pixel intensity, so a true black in the content tends to get re-normalised away regardless of whether the style image also has true blacks. Diffusion has no feature-statistic loss in the loop — a pixel value of 0 is as easy to produce as any other, and the base model has seen enough museum-scraped paintings during training to know how deep blacks behave under different brushwork.
+A useful side effect of generating rather than editing: tonal extremes survive. The statistic-matching methods in the sibling project (Magenta, Gatys, StyTr²) match Gram matrices and channel-wise mean/std, both invariant to absolute pixel intensity, so a true black in the content tends to get re-normalised away regardless of whether the style image also has true blacks. Diffusion has no feature-statistic loss in the loop - a pixel value of 0 is as easy to produce as any other, and the base model has seen enough museum-scraped paintings during training to know how deep blacks behave under different brushwork.
 
 ### Limits on out-of-distribution inputs
 
-Content images can be wildly out-of-distribution without much issue. ControlNet does not pass the raw content image to the model — it passes a depth map or edge map, and depth/edges are universal features. Whatever the content shows, its depth map looks like a depth map, and the model just sees "structure roughly here, here, and here".
+Content images can be wildly out-of-distribution without much issue. ControlNet does not pass the raw content image to the model - it passes a depth map or edge map, and depth/edges are universal features. Whatever the content shows, its depth map looks like a depth map, and the model just sees "structure roughly here, here, and here".
 
-Style is the OOD-sensitive direction. IP-Adapter relies on CLIP, a generic visual–semantic encoder trained on ~400 M image–text pairs. For mainstream art-historical styles — impressionism, watercolour, oil painting, ink wash, anime, cyberpunk, the modal Artstation aesthetic — CLIP has rich representations and the diffusion model has seen plenty of training examples; results are good. For genuinely novel styles — an unknown contemporary illustrator, an obscure 19th-century engraver, an idiosyncratic personal style — IP-Adapter still produces an output, but it is the closest approximation the base model can assemble from styles it already knows. Closing that gap is the job of per-style LoRA fine-tuning (see [Roadmap](#roadmap)).
+Style is the OOD-sensitive direction. IP-Adapter relies on CLIP, a generic visual–semantic encoder trained on ~400 M image–text pairs. For mainstream art-historical styles - impressionism, watercolour, oil painting, ink wash, anime, cyberpunk, the modal Artstation aesthetic - CLIP has rich representations and the diffusion model has seen plenty of training examples; results are good. For genuinely novel styles - an unknown contemporary illustrator, an obscure 19th-century engraver, an idiosyncratic personal style - IP-Adapter still produces an output, but it is the closest approximation the base model can assemble from styles it already knows. Closing that gap is the job of per-style LoRA fine-tuning (see [Roadmap](#roadmap)).
 
 ## Method
 
@@ -83,9 +84,9 @@ Disk: **~15 GB** for cached models on first run.
 
 ## Architecture
 
-- `src/app.py` — Gradio `Interface`. Inputs: content image, style image, optional prompt, ControlNet variant (depth/canny), advanced controls (see [Parameters](#parameters)). Output: stylised image.
-- `src/pipeline.py` — Builds the `StableDiffusionXLControlNetPipeline`, loads InstantStyle weights, applies the depth/canny preprocessor, runs inference. Attention runs on torch 2.x SDPA — no xFormers required on either CUDA or MPS. **Lazy-loaded** — first call triggers ~15 GB of Hugging Face Hub downloads and a few seconds of CUDA init.
-- `src/image_utils.py` — PIL preprocessing (EXIF orientation, RGB convert, resize so dimensions are multiples of 8 for the VAE).
+- `src/app.py` - Gradio `Interface`. Inputs: content image, style image, optional prompt, ControlNet variant (depth/canny), advanced controls (see [Parameters](#parameters)). Output: stylised image.
+- `src/pipeline.py` - Builds the `StableDiffusionXLControlNetPipeline`, loads InstantStyle weights, applies the depth/canny preprocessor, runs inference. Attention runs on torch 2.x SDPA - no xFormers required on either CUDA or MPS. **Lazy-loaded** - first call triggers ~15 GB of Hugging Face Hub downloads and a few seconds of CUDA init.
+- `src/image_utils.py` - PIL preprocessing (EXIF orientation, RGB convert, resize so dimensions are multiples of 8 for the VAE).
 
 ### Model cache behaviour
 
@@ -120,7 +121,7 @@ The GUI exposes named presets which map to fixed combinations of IP-Adapter weig
 
 In no particular order:
 
-1. **Per-style LoRA fine-tuning** — a separate training script that trains a LoRA on 10–50 images of a target style, saved into `loras/<style-name>.safetensors`, selectable from the UI. The highest-fidelity path when the goal is matching a specific artist or hand.
-2. **Refiner stage** — SDXL ships a refiner model that improves fine detail. Adds ~3 GB but visibly better edges/textures.
-3. **Img2img mode** — instead of pure ControlNet conditioning, use the content image as the starting latent (`StableDiffusionXLImg2ImgPipeline` + IP-Adapter). Different tradeoff: more content fidelity, less stylistic freedom.
-4. **Hosted inference fallback** — for users without a GPU, allow pointing at a Replicate / Modal / fal.ai endpoint instead of running the pipeline locally.
+1. **Per-style LoRA fine-tuning** - a separate training script that trains a LoRA on 10–50 images of a target style, saved into `loras/<style-name>.safetensors`, selectable from the UI. The highest-fidelity path when the goal is matching a specific artist or hand.
+2. **Refiner stage** - SDXL ships a refiner model that improves fine detail. Adds ~3 GB but visibly better edges/textures.
+3. **Img2img mode** - instead of pure ControlNet conditioning, use the content image as the starting latent (`StableDiffusionXLImg2ImgPipeline` + IP-Adapter). Different tradeoff: more content fidelity, less stylistic freedom.
+4. **Hosted inference fallback** - for users without a GPU, allow pointing at a Replicate / Modal / fal.ai endpoint instead of running the pipeline locally.
