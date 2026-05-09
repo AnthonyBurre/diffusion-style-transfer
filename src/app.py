@@ -22,6 +22,8 @@ from .pipeline import (
     StylePipeline,
 )
 
+PREVIEW_HEIGHT = 320
+
 _pipeline = StylePipeline()
 
 
@@ -74,9 +76,17 @@ def build_ui() -> gr.Blocks:
         gr.Markdown("# Diffusion-based artistic style transfer")
         with gr.Row():
             with gr.Column(scale=1):
-                content = gr.Image(type="filepath", label="Content")
+                content = gr.Image(
+                    type="filepath", 
+                    label="Content",
+                    height=PREVIEW_HEIGHT
+                )
             with gr.Column(scale=1):
-                style = gr.Image(type="filepath", label="Style")
+                style = gr.Image(
+                    type="filepath", 
+                    label="Style",
+                    height=PREVIEW_HEIGHT
+                )
         with gr.Row():
             with gr.Column(scale=1):
                 prompt = gr.Textbox(
