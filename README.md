@@ -51,13 +51,6 @@ Stable Diffusion is primarily a text-to-image model: at every denoising step the
 
 In this pipeline three conditioning signals - the optional text prompt, the depth map of the content image, and the InstantStyle features of the style image - pull on every one of the ~30 denoising steps simultaneously.
 
-A useful side effect of generating rather than editing: tonal extremes survive. The statistic-matching methods in the sibling project (Magenta, Gatys, StyTr²) match Gram matrices and channel-wise mean/std, both invariant to absolute pixel intensity, so a true black in the content tends to get re-normalised away regardless of whether the style image also has true blacks. Diffusion has no feature-statistic loss in the loop - a pixel value of 0 is as easy to produce as any other, and the base model has seen enough museum-scraped paintings during training to know how deep blacks behave under different brushwork.
-
-### Limits on out-of-distribution inputs
-
-Content images can be wildly out-of-distribution without much issue. ControlNet does not pass the raw content image to the model - it passes a depth map or edge map, and depth/edges are universal features. Whatever the content shows, its depth map looks like a depth map, and the model just sees "structure roughly here, here, and here".
-
-Style is the OOD-sensitive direction. IP-Adapter relies on CLIP, a generic visual–semantic encoder trained on ~400 M image–text pairs. For mainstream art-historical styles - impressionism, watercolour, oil painting, ink wash, anime, cyberpunk, the modal Artstation aesthetic - CLIP has rich representations and the diffusion model has seen plenty of training examples; results are good. For genuinely novel styles - an unknown contemporary illustrator, an obscure 19th-century engraver, an idiosyncratic personal style - IP-Adapter still produces an output, but it is the closest approximation the base model can assemble from styles it already knows. Closing that gap is the job of per-style LoRA fine-tuning (see [Roadmap](#roadmap)).
 
 ## Method
 
