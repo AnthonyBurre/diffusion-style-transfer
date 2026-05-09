@@ -8,17 +8,19 @@ warnings.filterwarnings("ignore", message="Importing from timm.models.registry i
 # Internal to the library
 warnings.filterwarnings("ignore", message="Overwriting tiny_vit_")
 
+import tempfile
+from pathlib import Path
+
 import gradio as gr
+from PIL import Image
 
-from .image_utils import prepare_content_image, prepare_style_image
-from .pipeline import NEGATIVE_PROMPT_DEFAULT, StylePipeline
-
-PRESETS: dict[str, dict[str, float]] = {
-    "follow content closely": {"ip_adapter_weight": 0.5, "controlnet_scale": 0.85},
-    "balanced":               {"ip_adapter_weight": 0.8, "controlnet_scale": 0.6},
-    "maximum style":          {"ip_adapter_weight": 1.1, "controlnet_scale": 0.35},
-}
-DEFAULT_PRESET = "balanced"
+from .image_utils import output_filename, prepare_content_image, prepare_style_image
+from .pipeline import (
+    DEFAULT_PRESET,
+    NEGATIVE_PROMPT_DEFAULT,
+    PRESETS,
+    StylePipeline,
+)
 
 _pipeline = StylePipeline()
 
@@ -29,8 +31,8 @@ def _apply_preset(name: str) -> tuple[float, float]:
 
 
 def stylise(
-    content,
-    style,
+    content_path,
+    style_path,
     prompt,
     controlnet_variant,
     ip_adapter_weight,
@@ -41,13 +43,13 @@ def stylise(
     seed,
     negative_prompt,
 ):
-    if content is None or style is None:
+    if content_path is None or style_path is None:
         raise gr.Error("Both content and style images are required.")
 
-    content_img = prepare_content_image(content, max_size=int(max_size))
-    style_img = prepare_style_image(style)
+    content_img = prepare_content_image(Image.open(content_path), max_size=int(max_size))
+    style_img = prepare_style_image(Image.open(style_path))
 
-    return _pipeline.generate(
+    result = _pipeline.generate(
         content=content_img,
         style=style_img,
         prompt=prompt,
@@ -60,15 +62,23 @@ def stylise(
         negative_prompt=negative_prompt,
     )
 
+    name = output_filename(Path(content_path).stem, Path(style_path).stem)
+    out_path = Path(tempfile.mkdtemp()) / name
+    result.save(out_path, format="webp", lossless=True)
+    return str(out_path)
+
 
 def build_ui() -> gr.Blocks:
     default = PRESETS[DEFAULT_PRESET]
     with gr.Blocks(title="Diffusion-based style transfer") as demo:
         gr.Markdown("# Diffusion-based artistic style transfer")
         with gr.Row():
-            with gr.Column():
-                content = gr.Image(type="pil", label="Content")
-                style = gr.Image(type="pil", label="Style")
+            with gr.Column(scale=1):
+                content = gr.Image(type="filepath", label="Content")
+            with gr.Column(scale=1):
+                style = gr.Image(type="filepath", label="Style")
+        with gr.Row():
+            with gr.Column(scale=1):
                 prompt = gr.Textbox(
                     label="Prompt (optional)",
                     placeholder="oil painting, ink wash, watercolour, ...",
@@ -105,8 +115,8 @@ def build_ui() -> gr.Blocks:
                         value=NEGATIVE_PROMPT_DEFAULT, label="Negative prompt",
                     )
                 run = gr.Button("Stylise", variant="primary")
-            with gr.Column():
-                output = gr.Image(type="pil", label="Output")
+            with gr.Column(scale=1):
+                output = gr.Image(type="filepath", label="Output", interactive=False)
 
         preset.change(_apply_preset, preset, [ip_adapter_weight, controlnet_scale])
         run.click(

@@ -22,6 +22,13 @@ IP_ADAPTER_IMAGE_ENCODER = "models/image_encoder"
 
 NEGATIVE_PROMPT_DEFAULT = "blurry, low quality, distorted"
 
+PRESETS: dict[str, dict[str, float]] = {
+    "follow content closely": {"ip_adapter_weight": 0.5, "controlnet_scale": 0.85},
+    "balanced":               {"ip_adapter_weight": 0.8, "controlnet_scale": 0.6},
+    "maximum style":          {"ip_adapter_weight": 1.1, "controlnet_scale": 0.35},
+}
+DEFAULT_PRESET = "balanced"
+
 LOW_VRAM_THRESHOLD_BYTES = 10 * 1024**3
 
 

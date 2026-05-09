@@ -31,6 +31,18 @@ python -m src.app
 
 On Apple Silicon the default PyPI index is correct and MPS is detected automatically.
 
+## Headless / batch processing
+
+The CLI processes (content, style) pairs without launching the web UI. With no arguments it walks the cartesian product of `examples/content/` × `examples/style/` and writes results to `examples/output/`:
+
+```shell
+python -m src.cli                                  # examples/content × examples/style → examples/output
+python -m src.cli -c my.jpg -s ref.jpg -o out.webp # single pair to a single file
+python -m src.cli -v canny -p "maximum style"      # variant + preset overrides
+```
+
+Every UI knob is exposed as a flag, see `python -m src.cli --help`. Outputs are named `sdxl-<content>_X_<style>.webp`, the same convention used when downloading from the Gradio app.
+
 ## Background
 
 My last image style transfer project produced some interesting results using three statistic-matching methods (Magenta, Gatys, StyTr²), but failed to fully realize the potential of style transfer. Diffusion methods are the next approach to investigate.
@@ -69,7 +81,7 @@ A diffusion sampling loop (~30 steps) generates the final image.
 | 8 GB GPU | 8 GB | ~2 min | Sequential CPU offload kicks in automatically (10 GB VRAM threshold) |
 | 12+ GB GPU | 12 GB | ~15–30 s | Recommended baseline |
 | 24 GB GPU | 24 GB | ~10 s | Comfortable; can run higher resolutions / bigger batches |
-| Apple Silicon (MPS) | unified | ~45–90 s on M2/M3 Max | Works via `diffusers` MPS backend |
+| Apple Silicon (MPS) | unified | ~30–60 s on M4 Max | Works via `diffusers` MPS backend. Base M2 chips are 20–30× slower (~25 min/image) and not recommended. |
 | CPU only | n/a | 5+ min | Technically works, not recommended |
 
 Disk: **~15 GB** for cached models on first run.
@@ -77,9 +89,10 @@ Disk: **~15 GB** for cached models on first run.
 
 ## Architecture
 
-- `src/app.py` - Gradio `Interface`. Inputs: content image, style image, optional prompt, ControlNet variant (depth/canny), advanced controls (see [Parameters](#parameters)). Output: stylised image.
+- `src/app.py` - Gradio UI. Inputs side-by-side on top; controls (preset, ControlNet variant, advanced sliders) lower-left; output lower-right. Saves each result to a tempdir as `sdxl-<content>_X_<style>.webp` and returns the path so the browser download has a meaningful name.
+- `src/cli.py` - Headless batch driver. Cartesian product over `examples/content/` × `examples/style/` by default; same naming convention as the app. Every UI knob is a flag.
 - `src/pipeline.py` - Builds the `StableDiffusionXLControlNetPipeline`, loads InstantStyle weights, applies the depth/canny preprocessor, runs inference. Attention runs on torch 2.x SDPA - no xFormers required on either CUDA or MPS. **Lazy-loaded** - first call triggers ~15 GB of Hugging Face Hub downloads and a few seconds of CUDA init.
-- `src/image_utils.py` - PIL preprocessing (EXIF orientation, RGB convert, resize so dimensions are multiples of 8 for the VAE).
+- `src/image_utils.py` - PIL preprocessing (EXIF orientation, RGB convert, resize so dimensions are multiples of 8 for the VAE) and the shared `output_filename()` helper.
 
 ### Model cache behaviour
 

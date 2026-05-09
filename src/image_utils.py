@@ -30,3 +30,8 @@ def prepare_style_image(image: Image.Image, max_size: int = 512) -> Image.Image:
         return image
     scale = max_size / max(w, h)
     return image.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+
+
+def output_filename(content_stem: str, style_stem: str) -> str:
+    """Output filename convention shared by ``src.app`` (Gradio) and ``src.cli``."""
+    return f"sdxl-{content_stem}_X_{style_stem}.webp"
