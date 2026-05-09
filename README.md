@@ -6,7 +6,7 @@ Stable Diffusion XL (SDXL) is comfortable with ~12 GB VRAM and takes tens of sec
 
 ## Run with Docker (CUDA)
 
-**Linux host with an NVIDIA GPU only.** `--gpus all` requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/), which is Linux-only — Docker Desktop on macOS and Windows runs containers inside a VM that has no GPU passthrough. 
+**Linux, or Windows via WSL2 — both with an NVIDIA GPU.** `--gpus all` requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/), which is supported on Linux and inside WSL2 (NVIDIA exposes CUDA into the WSL2 VM). Docker Desktop on macOS runs containers inside a VM with no GPU passthrough.
 
 ```shell
 docker build -t style-transfer-diffusion .
@@ -19,13 +19,14 @@ The `-v` mount points the container at the host Hugging Face cache; see [Model c
 
 ## Run on the host
 
-On a Mac (including Apple Silicon), skip Docker and use the host instructions below.
+If Docker isn't an option (macOS, or any host without the NVIDIA Container Toolkit), run directly on the host.
 
 ```shell
 python3 -m venv .venv
-.venv/bin/pip install --upgrade pip
-.venv/bin/pip install -r requirements.txt   # add --extra-index-url https://download.pytorch.org/whl/cu124 on Linux/CUDA hosts
-.venv/bin/python -m src.app
+source .venv/bin/activate                # Windows: .venv\Scripts\activate
+pip install --upgrade pip
+pip install -r requirements.txt          # add --extra-index-url https://download.pytorch.org/whl/cu124 on CUDA hosts (Linux or Windows)
+python -m src.app
 ```
 
 On Apple Silicon the default PyPI index is correct and MPS is detected automatically.
