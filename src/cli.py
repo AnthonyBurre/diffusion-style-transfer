@@ -2,12 +2,15 @@
 
 The bare invocation ``python -m src.cli`` batch-processes every image in
 ``examples/content`` against every image in ``examples/style`` through the
-SDXL + InstantStyle + ControlNet pipeline, writing ``.webp`` files into
+InstantStyle + ControlNet pipeline, writing ``.webp`` files into
 ``examples/output/`` using the same filename convention as the Gradio app.
 
 Each of ``-c`` / ``-s`` may be a file or a directory; with directory inputs
 the cartesian product of (content, style) pairs is processed. ``-o`` is
 either an output file (single-pair only) or an output directory.
+
+``--backend`` selects the diffusion base model: ``sdxl`` (default, ~12 GB
+VRAM) or ``sd15`` (lighter, faster, for older / smaller hardware).
 
 Sibling of ``src.app`` (the Gradio UI); the two share the pipeline and
 preprocessing modules but not dispatch code, so UI changes can't ripple
@@ -20,6 +23,7 @@ warnings.filterwarnings("ignore", message="The module 'mediapipe' is not install
 warnings.filterwarnings("ignore", message="Importing from timm.models.layers is deprecated")
 warnings.filterwarnings("ignore", message="Importing from timm.models.registry is deprecated")
 warnings.filterwarnings("ignore", message="Overwriting tiny_vit_")
+warnings.filterwarnings("ignore", message="The `local_dir_use_symlinks` argument is deprecated")
 
 import argparse
 import sys
@@ -29,6 +33,8 @@ from PIL import Image
 
 from .image_utils import output_filename, prepare_content_image, prepare_style_image
 from .pipeline import (
+    BACKENDS,
+    DEFAULT_BACKEND,
     DEFAULT_PRESET,
     NEGATIVE_PROMPT_DEFAULT,
     PRESETS,
@@ -86,11 +92,16 @@ def run(args):
     )
     seed = None if args.seed is None or args.seed < 0 else args.seed
 
-    pipeline = StylePipeline()
+    max_size = (
+        args.max_size if args.max_size is not None
+        else BACKENDS[args.backend].default_max_size
+    )
+
+    pipeline = StylePipeline(backend=args.backend)
 
     i = 0
     for content_path in contents:
-        content_img = prepare_content_image(Image.open(content_path), max_size=args.max_size)
+        content_img = prepare_content_image(Image.open(content_path), max_size=max_size)
         for style_path in styles:
             i += 1
             sys.stderr.write(f"[{i}/{total}] {content_path.stem} × {style_path.stem}\n")
@@ -111,7 +122,7 @@ def run(args):
             )
 
             out_path = out if is_file_output else out / output_filename(
-                content_path.stem, style_path.stem
+                content_path.stem, style_path.stem, backend=args.backend
             )
             _save(result, out_path)
             print(str(out_path.resolve()))
@@ -139,6 +150,12 @@ def main():
              "or output directory for batch (default: examples/output)",
     )
     parser.add_argument(
+        "-b", "--backend", default=DEFAULT_BACKEND, choices=sorted(BACKENDS),
+        help=f"diffusion backend: 'sdxl' is the flagship (~12 GB VRAM), "
+             f"'sd15' is the lightweight option for older / smaller hardware "
+             f"(~4 GB VRAM, faster, lower fidelity) (default: {DEFAULT_BACKEND})",
+    )
+    parser.add_argument(
         "-v", "--controlnet-variant", default="depth", choices=["depth", "canny"],
         help="content conditioning signal (default: depth)",
     )
@@ -149,13 +166,16 @@ def main():
     parser.add_argument("--prompt", default="", help="optional text prompt")
     parser.add_argument(
         "--ip-adapter-weight", type=float, default=None,
-        help="override preset's IP-Adapter weight (0.0–1.5)",
+        help="override preset's IP-Adapter weight (0.0-1.5)",
     )
     parser.add_argument(
         "--controlnet-scale", type=float, default=None,
-        help="override preset's ControlNet conditioning scale (0.0–1.5)",
+        help="override preset's ControlNet conditioning scale (0.0-1.5)",
     )
-    parser.add_argument("--max-size", type=int, default=1024, help="max output side in px")
+    parser.add_argument(
+        "--max-size", type=int, default=None,
+        help="max output side in px (default: 1024 for sdxl, 512 for sd15)",
+    )
     parser.add_argument("--steps", type=int, default=30, help="diffusion inference steps")
     parser.add_argument("--guidance-scale", type=float, default=5.0, help="classifier-free guidance scale")
     parser.add_argument("--seed", type=int, default=-1, help="seed; -1 = random")

@@ -7,7 +7,10 @@ warnings.filterwarnings("ignore", message="Importing from timm.models.layers is 
 warnings.filterwarnings("ignore", message="Importing from timm.models.registry is deprecated")
 # Internal to the library
 warnings.filterwarnings("ignore", message="Overwriting tiny_vit_")
+# Emitted from inside diffusers' load_ip_adapter via huggingface_hub
+warnings.filterwarnings("ignore", message="The `local_dir_use_symlinks` argument is deprecated")
 
+import argparse
 import tempfile
 from pathlib import Path
 
@@ -16,6 +19,8 @@ from PIL import Image
 
 from .image_utils import output_filename, prepare_content_image, prepare_style_image
 from .pipeline import (
+    BACKENDS,
+    DEFAULT_BACKEND,
     DEFAULT_PRESET,
     NEGATIVE_PROMPT_DEFAULT,
     PRESETS,
@@ -24,7 +29,8 @@ from .pipeline import (
 
 PREVIEW_HEIGHT = 320
 
-_pipeline = StylePipeline()
+# Constructed in ``main()`` once the launch-time backend is known.
+_pipeline: StylePipeline | None = None
 
 
 def _apply_preset(name: str) -> tuple[float, float]:
@@ -64,16 +70,18 @@ def stylise(
         negative_prompt=negative_prompt,
     )
 
-    name = output_filename(Path(content_path).stem, Path(style_path).stem)
+    name = output_filename(
+        Path(content_path).stem, Path(style_path).stem, backend=_pipeline.backend
+    )
     out_path = Path(tempfile.mkdtemp()) / name
     result.save(out_path, format="webp", lossless=True)
     return str(out_path)
 
 
-def build_ui() -> gr.Blocks:
+def build_ui(backend: str) -> gr.Blocks:
     default = PRESETS[DEFAULT_PRESET]
-    with gr.Blocks(title="Diffusion-based style transfer") as demo:
-        gr.Markdown("# Diffusion-based artistic style transfer")
+    with gr.Blocks(title=f"Diffusion-based style transfer ({backend})") as demo:
+        gr.Markdown(f"# Diffusion-based artistic style transfer ({backend})")
         with gr.Row():
             with gr.Column(scale=1):
                 content = gr.Image(
@@ -113,7 +121,7 @@ def build_ui() -> gr.Blocks:
                         label="ControlNet conditioning scale",
                     )
                     max_size = gr.Slider(
-                        512, 1024, value=1024, step=64,
+                        512, 1024, value=BACKENDS[backend].default_max_size, step=64,
                         label="Max output side (px)",
                     )
                     steps = gr.Slider(10, 60, value=30, step=1, label="Inference steps")
@@ -142,7 +150,23 @@ def build_ui() -> gr.Blocks:
 
 
 def main() -> None:
-    build_ui().launch(server_name="0.0.0.0", server_port=7860)
+    parser = argparse.ArgumentParser(
+        prog="python -m src.app",
+        description="Launch the Gradio UI for diffusion-based style transfer. "
+                    "The diffusion backend is fixed at launch so model weights "
+                    "are downloaded only for the chosen backend.",
+    )
+    parser.add_argument(
+        "-b", "--backend", default=DEFAULT_BACKEND, choices=sorted(BACKENDS),
+        help="diffusion backend: 'sdxl' is the flagship (~12 GB VRAM), "
+             "'sd15' is the lightweight option for older / smaller hardware "
+             "(~4 GB VRAM, faster, lower fidelity) (default: %(default)s)",
+    )
+    args = parser.parse_args()
+
+    global _pipeline
+    _pipeline = StylePipeline(backend=args.backend)
+    build_ui(args.backend).launch(server_name="0.0.0.0", server_port=7860)
 
 
 if __name__ == "__main__":
