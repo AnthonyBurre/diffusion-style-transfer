@@ -16,14 +16,7 @@ Sibling of ``src.app`` (the Gradio UI); the two share the pipeline and
 preprocessing modules but not dispatch code, so UI changes can't ripple
 into the CLI.
 """
-import warnings
-
-# Match src.app: silence the same upstream noise before pipeline import.
-warnings.filterwarnings("ignore", message="The module 'mediapipe' is not installed")
-warnings.filterwarnings("ignore", message="Importing from timm.models.layers is deprecated")
-warnings.filterwarnings("ignore", message="Importing from timm.models.registry is deprecated")
-warnings.filterwarnings("ignore", message="Overwriting tiny_vit_")
-warnings.filterwarnings("ignore", message="The `local_dir_use_symlinks` argument is deprecated")
+from . import _quiet  # noqa: F401  -- installs warning filters before pipeline import
 
 import argparse
 import sys
@@ -99,15 +92,19 @@ def run(args):
 
     pipeline = StylePipeline(backend=args.backend)
 
+    # Prepared once: each style is reused across every content image.
+    prepared_styles = [
+        (p, prepare_style_image(Image.open(p))) for p in styles
+    ]
+
     i = 0
     for content_path in contents:
         content_img = prepare_content_image(Image.open(content_path), max_size=max_size)
-        for style_path in styles:
+        for style_path, style_img in prepared_styles:
             i += 1
             sys.stderr.write(f"[{i}/{total}] {content_path.stem} × {style_path.stem}\n")
             sys.stderr.flush()
 
-            style_img = prepare_style_image(Image.open(style_path))
             result = pipeline.generate(
                 content=content_img,
                 style=style_img,

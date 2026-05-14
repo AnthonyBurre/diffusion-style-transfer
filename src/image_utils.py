@@ -32,7 +32,7 @@ def prepare_style_image(image: Image.Image, max_size: int = 512) -> Image.Image:
     return image.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
 
 
-def output_filename(content_stem: str, style_stem: str, backend: str = "sdxl") -> str:
+def output_filename(content_stem: str, style_stem: str, backend: str) -> str:
     """Output filename convention shared by ``src.app`` (Gradio) and ``src.cli``.
 
     The ``backend`` prefix lets batch outputs from different backends

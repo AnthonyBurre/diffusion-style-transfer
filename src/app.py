@@ -1,14 +1,4 @@
-import warnings
-
-# We only use canny + depth conditioning, dont need mediapipe
-warnings.filterwarnings("ignore", message="The module 'mediapipe' is not installed")
-# Emitted from inside controlnet_aux, await an upstream release
-warnings.filterwarnings("ignore", message="Importing from timm.models.layers is deprecated")
-warnings.filterwarnings("ignore", message="Importing from timm.models.registry is deprecated")
-# Internal to the library
-warnings.filterwarnings("ignore", message="Overwriting tiny_vit_")
-# Emitted from inside diffusers' load_ip_adapter via huggingface_hub
-warnings.filterwarnings("ignore", message="The `local_dir_use_symlinks` argument is deprecated")
+from . import _quiet  # noqa: F401  -- installs warning filters before pipeline import
 
 import argparse
 import tempfile
@@ -57,6 +47,8 @@ def stylise(
     content_img = prepare_content_image(Image.open(content_path), max_size=int(max_size))
     style_img = prepare_style_image(Image.open(style_path))
 
+    seed = int(seed) if seed is not None else -1
+
     result = _pipeline.generate(
         content=content_img,
         style=style_img,
@@ -66,7 +58,7 @@ def stylise(
         controlnet_scale=controlnet_scale,
         steps=steps,
         guidance_scale=guidance_scale,
-        seed=int(seed) if seed is not None and int(seed) >= 0 else None,
+        seed=seed if seed >= 0 else None,
         negative_prompt=negative_prompt,
     )
 

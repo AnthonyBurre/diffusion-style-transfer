@@ -100,6 +100,7 @@ Disk: **~15 GB** for cached models on first run.
 - `src/cli.py` - Headless batch driver. Cartesian product over `examples/content/` × `examples/style/` by default; same naming convention as the app. Every UI knob is a flag.
 - `src/pipeline.py` - Builds the `StableDiffusionXLControlNetPipeline`, loads InstantStyle weights, applies the depth/canny preprocessor, runs inference. Attention runs on torch 2.x SDPA - no xFormers required on either CUDA or MPS. **Lazy-loaded** - first call triggers ~15 GB of Hugging Face Hub downloads and a few seconds of CUDA init.
 - `src/image_utils.py` - PIL preprocessing (EXIF orientation, RGB convert, resize so dimensions are multiples of 8 for the VAE) and the shared `output_filename()` helper.
+- `src/_quiet.py` - Shared warning-filter setup, imported first by both entrypoints to silence known-harmless upstream noise before the pipeline loads.
 
 ### Model cache behaviour
 
