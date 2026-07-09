@@ -49,18 +49,21 @@ def stylise(
 
     seed = int(seed) if seed is not None else -1
 
-    result = _pipeline.generate(
-        content=content_img,
-        style=style_img,
-        prompt=prompt,
-        controlnet_variant=controlnet_variant,
-        ip_adapter_weight=ip_adapter_weight,
-        controlnet_scale=controlnet_scale,
-        steps=steps,
-        guidance_scale=guidance_scale,
-        seed=seed if seed >= 0 else None,
-        negative_prompt=negative_prompt,
-    )
+    try:
+        result = _pipeline.generate(
+            content=content_img,
+            style=style_img,
+            prompt=prompt,
+            controlnet_variant=controlnet_variant,
+            ip_adapter_weight=ip_adapter_weight,
+            controlnet_scale=controlnet_scale,
+            steps=steps,
+            guidance_scale=guidance_scale,
+            seed=seed if seed >= 0 else None,
+            negative_prompt=negative_prompt,
+        )
+    except Exception as exc:  # noqa: BLE001 - report in the UI instead of a bare 500
+        raise gr.Error(f"Generation failed: {type(exc).__name__}: {exc}")
 
     name = output_filename(
         Path(content_path).stem, Path(style_path).stem, backend=_pipeline.backend

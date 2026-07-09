@@ -4,5 +4,6 @@
 **/*.pyc
 .cache
 .DS_Store
+examples/
 README.md
 LICENSE

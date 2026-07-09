@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 
 import torch
@@ -64,7 +65,13 @@ PRESETS: dict[str, dict[str, float]] = {
 }
 DEFAULT_PRESET = "balanced"
 
-LOW_VRAM_THRESHOLD_BYTES = 10 * 1024**3
+# Below this much device memory the pipeline CPU-offloads instead of placing the
+# whole model graph on-device, so it fits — and stops swapping to death — on
+# small machines. CUDA looks at dedicated VRAM; MPS shares unified system RAM, so
+# we look at total RAM there (an 8 GB Apple Silicon machine cannot hold SDXL on
+# the GPU at all, and even SD1.5 will thrash without offloading).
+CONSTRAINED_CUDA_VRAM_BYTES = 12 * 1024**3
+CONSTRAINED_SYSTEM_RAM_BYTES = 16 * 1024**3
 
 
 def _detect_device() -> tuple[str, torch.dtype]:
@@ -75,10 +82,20 @@ def _detect_device() -> tuple[str, torch.dtype]:
     return "cpu", torch.float32
 
 
-def _is_low_vram() -> bool:
-    if not torch.cuda.is_available():
-        return False
-    return torch.cuda.get_device_properties(0).total_memory < LOW_VRAM_THRESHOLD_BYTES
+def total_memory_bytes(device: str) -> int:
+    """Device memory for ``cuda``; total unified/system RAM for ``mps``/``cpu``."""
+    if device == "cuda":
+        return torch.cuda.get_device_properties(0).total_memory
+    return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+
+
+def _is_memory_constrained(device: str) -> bool:
+    """Whether to CPU-offload rather than place the whole pipeline on-device."""
+    if device == "cuda":
+        return total_memory_bytes(device) < CONSTRAINED_CUDA_VRAM_BYTES
+    if device == "mps":
+        return total_memory_bytes(device) < CONSTRAINED_SYSTEM_RAM_BYTES
+    return False  # plain CPU: nothing to offload to
 
 
 def _instant_style_scale(backend: str, weight: float):
@@ -118,7 +135,7 @@ class StylePipeline:
         self.backend = backend
         self.config = BACKENDS[backend]
         self.device, self.dtype = _detect_device()
-        self.low_vram = _is_low_vram()
+        self.memory_constrained = _is_memory_constrained(self.device)
         self._pipes: dict = {}
         self._depth = None
         self._canny = CannyDetector()
@@ -153,8 +170,22 @@ class StylePipeline:
             image_encoder_folder=IP_ADAPTER_IMAGE_ENCODER,
         )
 
-        if self.low_vram:
-            pipe.enable_sequential_cpu_offload()
+        if self.memory_constrained:
+            # Keep peak memory low so the pipeline fits a small GPU / 8 GB Mac
+            # instead of OOMing (SDXL) or swapping until the OS kills it (SD1.5).
+            if self.backend == "sdxl":
+                # SDXL's ~9 GB of fp16 weights can't sit on a small device at
+                # once; stream them submodule-by-submodule. Correct but slow.
+                pipe.enable_sequential_cpu_offload(device=self.device)
+            else:
+                # SD1.5 fits with whole-model offload: only the active model is
+                # resident, avoiding the per-submodule streaming cost.
+                pipe.enable_model_cpu_offload(device=self.device)
+            # Tile the VAE decode to cap its peak-memory spike at high resolution.
+            # NB: attention slicing is intentionally NOT enabled — it swaps the
+            # UNet attention processors and clobbers IP-Adapter's, breaking
+            # stylisation ('tuple' object has no attribute 'shape').
+            pipe.vae.enable_tiling()
         else:
             pipe.to(self.device)
 
@@ -166,7 +197,7 @@ class StylePipeline:
             if self._depth is None:
                 # Keep the depth model off-GPU when VRAM is tight; it is small
                 # enough that CPU inference adds only a couple of seconds.
-                depth_device = "cpu" if self.low_vram else self.device
+                depth_device = "cpu" if self.memory_constrained else self.device
                 self._depth = hf_pipeline(
                     "depth-estimation",
                     model=DEPTH_MODEL,
