@@ -1,26 +1,26 @@
-import warnings
+from . import _quiet  # noqa: F401  -- installs warning filters before pipeline import
 
-# We only use canny + depth conditioning, dont need mediapipe
-warnings.filterwarnings("ignore", message="The module 'mediapipe' is not installed")
-# Emitted from inside controlnet_aux, await an upstream release
-warnings.filterwarnings("ignore", message="Importing from timm.models.layers is deprecated")
-warnings.filterwarnings("ignore", message="Importing from timm.models.registry is deprecated")
-# Internal to the library
-warnings.filterwarnings("ignore", message="Overwriting tiny_vit_")
+import argparse
+import tempfile
+from pathlib import Path
 
 import gradio as gr
+from PIL import Image
 
-from .image_utils import prepare_content_image, prepare_style_image
-from .pipeline import NEGATIVE_PROMPT_DEFAULT, StylePipeline
+from .image_utils import output_filename, prepare_content_image, prepare_style_image
+from .pipeline import (
+    BACKENDS,
+    DEFAULT_BACKEND,
+    DEFAULT_PRESET,
+    NEGATIVE_PROMPT_DEFAULT,
+    PRESETS,
+    StylePipeline,
+)
 
-PRESETS: dict[str, dict[str, float]] = {
-    "follow content closely": {"ip_adapter_weight": 0.5, "controlnet_scale": 0.85},
-    "balanced":               {"ip_adapter_weight": 0.8, "controlnet_scale": 0.6},
-    "maximum style":          {"ip_adapter_weight": 1.1, "controlnet_scale": 0.35},
-}
-DEFAULT_PRESET = "balanced"
+PREVIEW_HEIGHT = 320
 
-_pipeline = StylePipeline()
+# Constructed in ``main()`` once the launch-time backend is known.
+_pipeline: StylePipeline | None = None
 
 
 def _apply_preset(name: str) -> tuple[float, float]:
@@ -29,8 +29,8 @@ def _apply_preset(name: str) -> tuple[float, float]:
 
 
 def stylise(
-    content,
-    style,
+    content_path,
+    style_path,
     prompt,
     controlnet_variant,
     ip_adapter_weight,
@@ -41,34 +41,57 @@ def stylise(
     seed,
     negative_prompt,
 ):
-    if content is None or style is None:
+    if content_path is None or style_path is None:
         raise gr.Error("Both content and style images are required.")
 
-    content_img = prepare_content_image(content, max_size=int(max_size))
-    style_img = prepare_style_image(style)
+    content_img = prepare_content_image(Image.open(content_path), max_size=int(max_size))
+    style_img = prepare_style_image(Image.open(style_path))
 
-    return _pipeline.generate(
-        content=content_img,
-        style=style_img,
-        prompt=prompt,
-        controlnet_variant=controlnet_variant,
-        ip_adapter_weight=ip_adapter_weight,
-        controlnet_scale=controlnet_scale,
-        steps=steps,
-        guidance_scale=guidance_scale,
-        seed=int(seed) if seed is not None and int(seed) >= 0 else None,
-        negative_prompt=negative_prompt,
+    seed = int(seed) if seed is not None else -1
+
+    try:
+        result = _pipeline.generate(
+            content=content_img,
+            style=style_img,
+            prompt=prompt,
+            controlnet_variant=controlnet_variant,
+            ip_adapter_weight=ip_adapter_weight,
+            controlnet_scale=controlnet_scale,
+            steps=steps,
+            guidance_scale=guidance_scale,
+            seed=seed if seed >= 0 else None,
+            negative_prompt=negative_prompt,
+        )
+    except Exception as exc:  # noqa: BLE001 - report in the UI instead of a bare 500
+        raise gr.Error(f"Generation failed: {type(exc).__name__}: {exc}")
+
+    name = output_filename(
+        Path(content_path).stem, Path(style_path).stem, backend=_pipeline.backend
     )
+    out_path = Path(tempfile.mkdtemp()) / name
+    result.save(out_path, format="webp", lossless=True)
+    return str(out_path)
 
 
-def build_ui() -> gr.Blocks:
+def build_ui(backend: str) -> gr.Blocks:
     default = PRESETS[DEFAULT_PRESET]
-    with gr.Blocks(title="Diffusion-based style transfer") as demo:
-        gr.Markdown("# Diffusion-based artistic style transfer")
+    with gr.Blocks(title=f"Diffusion-based style transfer ({backend})") as demo:
+        gr.Markdown(f"# Diffusion-based artistic style transfer ({backend})")
         with gr.Row():
-            with gr.Column():
-                content = gr.Image(type="pil", label="Content")
-                style = gr.Image(type="pil", label="Style")
+            with gr.Column(scale=1):
+                content = gr.Image(
+                    type="filepath", 
+                    label="Content",
+                    height=PREVIEW_HEIGHT
+                )
+            with gr.Column(scale=1):
+                style = gr.Image(
+                    type="filepath", 
+                    label="Style",
+                    height=PREVIEW_HEIGHT
+                )
+        with gr.Row():
+            with gr.Column(scale=1):
                 prompt = gr.Textbox(
                     label="Prompt (optional)",
                     placeholder="oil painting, ink wash, watercolour, ...",
@@ -93,7 +116,7 @@ def build_ui() -> gr.Blocks:
                         label="ControlNet conditioning scale",
                     )
                     max_size = gr.Slider(
-                        512, 1024, value=1024, step=64,
+                        512, 1024, value=BACKENDS[backend].default_max_size, step=64,
                         label="Max output side (px)",
                     )
                     steps = gr.Slider(10, 60, value=30, step=1, label="Inference steps")
@@ -105,8 +128,8 @@ def build_ui() -> gr.Blocks:
                         value=NEGATIVE_PROMPT_DEFAULT, label="Negative prompt",
                     )
                 run = gr.Button("Stylise", variant="primary")
-            with gr.Column():
-                output = gr.Image(type="pil", label="Output")
+            with gr.Column(scale=1):
+                output = gr.Image(type="filepath", label="Output", interactive=False)
 
         preset.change(_apply_preset, preset, [ip_adapter_weight, controlnet_scale])
         run.click(
@@ -122,7 +145,23 @@ def build_ui() -> gr.Blocks:
 
 
 def main() -> None:
-    build_ui().launch(server_name="0.0.0.0", server_port=7860)
+    parser = argparse.ArgumentParser(
+        prog="python -m src.app",
+        description="Launch the Gradio UI for diffusion-based style transfer. "
+                    "The diffusion backend is fixed at launch so model weights "
+                    "are downloaded only for the chosen backend.",
+    )
+    parser.add_argument(
+        "-b", "--backend", default=DEFAULT_BACKEND, choices=sorted(BACKENDS),
+        help="diffusion backend: 'sdxl' is the flagship (~12 GB VRAM), "
+             "'sd15' is the lightweight option for older / smaller hardware "
+             "(~4 GB VRAM, faster, lower fidelity) (default: %(default)s)",
+    )
+    args = parser.parse_args()
+
+    global _pipeline
+    _pipeline = StylePipeline(backend=args.backend)
+    build_ui(args.backend).launch(server_name="0.0.0.0", server_port=7860)
 
 
 if __name__ == "__main__":

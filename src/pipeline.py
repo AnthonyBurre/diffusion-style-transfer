@@ -1,28 +1,77 @@
+import os
+from dataclasses import dataclass
+
 import torch
 from PIL import Image
 from controlnet_aux import CannyDetector
 from diffusers import (
     AutoencoderKL,
     ControlNetModel,
+    StableDiffusionControlNetPipeline,
     StableDiffusionXLControlNetPipeline,
 )
 from transformers import pipeline as hf_pipeline
 
-SDXL_BASE = "stabilityai/stable-diffusion-xl-base-1.0"
-VAE_REPO = "madebyollin/sdxl-vae-fp16-fix"
-CONTROLNETS = {
-    "depth": "diffusers/controlnet-depth-sdxl-1.0",
-    "canny": "diffusers/controlnet-canny-sdxl-1.0",
-}
 DEPTH_MODEL = "Intel/dpt-hybrid-midas"
 IP_ADAPTER_REPO = "h94/IP-Adapter"
-IP_ADAPTER_SUBFOLDER = "sdxl_models"
-IP_ADAPTER_WEIGHT = "ip-adapter_sdxl_vit-h.safetensors"
 IP_ADAPTER_IMAGE_ENCODER = "models/image_encoder"
+
+
+@dataclass(frozen=True)
+class BackendConfig:
+    base_model: str
+    pipeline_cls: type
+    controlnets: dict[str, str]
+    ip_adapter_subfolder: str
+    ip_adapter_weight: str
+    vae_repo: str | None  # None = use the base model's built-in VAE
+    default_max_size: int
+
+
+BACKENDS: dict[str, BackendConfig] = {
+    "sdxl": BackendConfig(
+        base_model="stabilityai/stable-diffusion-xl-base-1.0",
+        pipeline_cls=StableDiffusionXLControlNetPipeline,
+        controlnets={
+            "depth": "diffusers/controlnet-depth-sdxl-1.0",
+            "canny": "diffusers/controlnet-canny-sdxl-1.0",
+        },
+        ip_adapter_subfolder="sdxl_models",
+        ip_adapter_weight="ip-adapter_sdxl_vit-h.safetensors",
+        vae_repo="madebyollin/sdxl-vae-fp16-fix",  # stock SDXL VAE NaNs in fp16
+        default_max_size=1024,
+    ),
+    "sd15": BackendConfig(
+        base_model="stable-diffusion-v1-5/stable-diffusion-v1-5",
+        pipeline_cls=StableDiffusionControlNetPipeline,
+        controlnets={
+            "depth": "lllyasviel/control_v11f1p_sd15_depth",
+            "canny": "lllyasviel/control_v11p_sd15_canny",
+        },
+        ip_adapter_subfolder="models",
+        ip_adapter_weight="ip-adapter_sd15.safetensors",
+        vae_repo=None,
+        default_max_size=512,
+    ),
+}
+DEFAULT_BACKEND = "sdxl"
 
 NEGATIVE_PROMPT_DEFAULT = "blurry, low quality, distorted"
 
-LOW_VRAM_THRESHOLD_BYTES = 10 * 1024**3
+PRESETS: dict[str, dict[str, float]] = {
+    "follow content closely": {"ip_adapter_weight": 0.5, "controlnet_scale": 0.85},
+    "balanced":               {"ip_adapter_weight": 0.8, "controlnet_scale": 0.6},
+    "maximum style":          {"ip_adapter_weight": 1.1, "controlnet_scale": 0.35},
+}
+DEFAULT_PRESET = "balanced"
+
+# Below this much device memory the pipeline CPU-offloads instead of placing the
+# whole model graph on-device, so it fits — and stops swapping to death — on
+# small machines. CUDA looks at dedicated VRAM; MPS shares unified system RAM, so
+# we look at total RAM there (an 8 GB Apple Silicon machine cannot hold SDXL on
+# the GPU at all, and even SD1.5 will thrash without offloading).
+CONSTRAINED_CUDA_VRAM_BYTES = 12 * 1024**3
+CONSTRAINED_SYSTEM_RAM_BYTES = 16 * 1024**3
 
 
 def _detect_device() -> tuple[str, torch.dtype]:
@@ -33,60 +82,110 @@ def _detect_device() -> tuple[str, torch.dtype]:
     return "cpu", torch.float32
 
 
-def _is_low_vram() -> bool:
-    if not torch.cuda.is_available():
-        return False
-    return torch.cuda.get_device_properties(0).total_memory < LOW_VRAM_THRESHOLD_BYTES
+def total_memory_bytes(device: str) -> int:
+    """Device memory for ``cuda``; total unified/system RAM for ``mps``/``cpu``."""
+    if device == "cuda":
+        return torch.cuda.get_device_properties(0).total_memory
+    return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
 
 
-def _instant_style_scale(weight: float) -> dict:
-    """InstantStyle inserts the IP-Adapter only at the deep blocks that carry
-    style information, keeping the semantic blocks untouched."""
-    return {
-        "down": {"block_2": [0.0, weight]},
-        "up": {"block_0": [0.0, weight, 0.0]},
-    }
+def _is_memory_constrained(device: str) -> bool:
+    """Whether to CPU-offload rather than place the whole pipeline on-device."""
+    if device == "cuda":
+        return total_memory_bytes(device) < CONSTRAINED_CUDA_VRAM_BYTES
+    if device == "mps":
+        return total_memory_bytes(device) < CONSTRAINED_SYSTEM_RAM_BYTES
+    return False  # plain CPU: nothing to offload to
+
+
+def _instant_style_scale(backend: str, weight: float):
+    """Per-backend IP-Adapter scale targeting the U-Net blocks that carry
+    style information rather than semantic content.
+
+    SDXL: InstantStyle's published mapping inserts the adapter only at the
+    deep style blocks (down block 2 attn 1, up block 0 attn 1).
+
+    SD1.5: the SD1.5 U-Net has a different block layout and the per-block
+    dict format isn't reliably accepted by every diffusers release for
+    SD1.5 IP-Adapter. Apply a flat scalar instead — the result is plain
+    IP-Adapter on SD1.5 (slightly more semantic bleed than InstantStyle
+    proper), which is an acceptable trade for the lighter backend.
+    """
+    if backend == "sdxl":
+        return {
+            "down": {"block_2": [0.0, weight]},
+            "up": {"block_0": [0.0, weight, 0.0]},
+        }
+    return float(weight)
 
 
 class StylePipeline:
-    """Lazy-loaded SDXL + ControlNet + InstantStyle pipeline.
+    """Lazy-loaded ControlNet + InstantStyle pipeline.
 
     One pipeline is built per ControlNet variant on first use, then cached.
+    The ``backend`` selects between the SDXL flagship and a lighter SD1.5
+    path for older / smaller hardware (see ``BACKENDS``).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, backend: str = DEFAULT_BACKEND) -> None:
+        if backend not in BACKENDS:
+            raise ValueError(
+                f"Unknown backend: {backend!r}. Choose from {sorted(BACKENDS)}."
+            )
+        self.backend = backend
+        self.config = BACKENDS[backend]
         self.device, self.dtype = _detect_device()
-        self.low_vram = _is_low_vram()
-        self._pipes: dict[str, StableDiffusionXLControlNetPipeline] = {}
+        self.memory_constrained = _is_memory_constrained(self.device)
+        self._pipes: dict = {}
         self._depth = None
         self._canny = CannyDetector()
 
-    def _load(self, variant: str) -> StableDiffusionXLControlNetPipeline:
+    def _load(self, variant: str):
         if variant in self._pipes:
             return self._pipes[variant]
-        if variant not in CONTROLNETS:
+        if variant not in self.config.controlnets:
             raise ValueError(f"Unknown ControlNet variant: {variant}")
 
         controlnet = ControlNetModel.from_pretrained(
-            CONTROLNETS[variant], torch_dtype=self.dtype
+            self.config.controlnets[variant], torch_dtype=self.dtype
         )
-        vae = AutoencoderKL.from_pretrained(VAE_REPO, torch_dtype=self.dtype)
-        pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
-            SDXL_BASE,
+
+        kwargs = dict(
             controlnet=controlnet,
-            vae=vae,
             torch_dtype=self.dtype,
             variant="fp16" if self.dtype == torch.float16 else None,
         )
+        if self.config.vae_repo is not None:
+            kwargs["vae"] = AutoencoderKL.from_pretrained(
+                self.config.vae_repo, torch_dtype=self.dtype
+            )
+
+        pipe = self.config.pipeline_cls.from_pretrained(
+            self.config.base_model, **kwargs
+        )
         pipe.load_ip_adapter(
             IP_ADAPTER_REPO,
-            subfolder=IP_ADAPTER_SUBFOLDER,
-            weight_name=IP_ADAPTER_WEIGHT,
+            subfolder=self.config.ip_adapter_subfolder,
+            weight_name=self.config.ip_adapter_weight,
             image_encoder_folder=IP_ADAPTER_IMAGE_ENCODER,
         )
 
-        if self.low_vram:
-            pipe.enable_sequential_cpu_offload()
+        if self.memory_constrained:
+            # Keep peak memory low so the pipeline fits a small GPU / 8 GB Mac
+            # instead of OOMing (SDXL) or swapping until the OS kills it (SD1.5).
+            if self.backend == "sdxl":
+                # SDXL's ~9 GB of fp16 weights can't sit on a small device at
+                # once; stream them submodule-by-submodule. Correct but slow.
+                pipe.enable_sequential_cpu_offload(device=self.device)
+            else:
+                # SD1.5 fits with whole-model offload: only the active model is
+                # resident, avoiding the per-submodule streaming cost.
+                pipe.enable_model_cpu_offload(device=self.device)
+            # Tile the VAE decode to cap its peak-memory spike at high resolution.
+            # NB: attention slicing is intentionally NOT enabled — it swaps the
+            # UNet attention processors and clobbers IP-Adapter's, breaking
+            # stylisation ('tuple' object has no attribute 'shape').
+            pipe.vae.enable_tiling()
         else:
             pipe.to(self.device)
 
@@ -98,7 +197,7 @@ class StylePipeline:
             if self._depth is None:
                 # Keep the depth model off-GPU when VRAM is tight; it is small
                 # enough that CPU inference adds only a couple of seconds.
-                depth_device = "cpu" if self.low_vram else self.device
+                depth_device = "cpu" if self.memory_constrained else self.device
                 self._depth = hf_pipeline(
                     "depth-estimation",
                     model=DEPTH_MODEL,
@@ -121,7 +220,9 @@ class StylePipeline:
         negative_prompt: str,
     ) -> Image.Image:
         pipe = self._load(controlnet_variant)
-        pipe.set_ip_adapter_scale(_instant_style_scale(float(ip_adapter_weight)))
+        pipe.set_ip_adapter_scale(
+            _instant_style_scale(self.backend, float(ip_adapter_weight))
+        )
 
         control_image = self._control_image(content, controlnet_variant)
 

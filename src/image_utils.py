@@ -3,7 +3,7 @@ from PIL import Image, ImageOps
 
 def prepare_content_image(image: Image.Image, max_size: int = 1024) -> Image.Image:
     """Apply EXIF rotation, convert to RGB, scale longest side to ``max_size``,
-    and round both dimensions down to a multiple of 8 for the SDXL VAE.
+    and round both dimensions down to a multiple of 8 for the diffusion VAE.
 
     The returned dimensions drive the diffusion output resolution.
     """
@@ -30,3 +30,12 @@ def prepare_style_image(image: Image.Image, max_size: int = 512) -> Image.Image:
         return image
     scale = max_size / max(w, h)
     return image.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+
+
+def output_filename(content_stem: str, style_stem: str, backend: str) -> str:
+    """Output filename convention shared by ``src.app`` (Gradio) and ``src.cli``.
+
+    The ``backend`` prefix lets batch outputs from different backends
+    (e.g. ``sdxl-…`` vs ``sd15-…``) coexist in the same directory.
+    """
+    return f"{backend}-{content_stem}_X_{style_stem}.webp"
