@@ -2,8 +2,5 @@
 
 */__pycache__/
 
-# Ad-hoc batch outputs stay out of git; the committed README gallery (the
-# sd15 content × style matrix) is the only exception.
-examples/output/*
+examples/*
 !examples/output/.gitkeep
-!examples/output/sd15-*_X_*.webp
