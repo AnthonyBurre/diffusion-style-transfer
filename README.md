@@ -19,30 +19,31 @@ The `-v` mount points the container at the host Hugging Face cache; see [Model c
 
 ## Run on the host
 
-If Docker isn't an option (macOS, or any host without the NVIDIA Container Toolkit), run directly on the host.
+If Docker isn't an option, run directly on the host with [uv](https://docs.astral.sh/uv/):
 
 ```shell
-python3 -m venv .venv
-source .venv/bin/activate                # Windows: .venv\Scripts\activate
-pip install --upgrade pip
-pip install -r requirements.txt          # add --extra-index-url https://download.pytorch.org/whl/cu124 on CUDA hosts (Linux or Windows)
-python -m src.app
+uv sync --extra cuda      # Linux / Windows with an NVIDIA GPU (CUDA 12.6 wheels)
+uv sync --extra cpu       # CPU-only — or Apple Silicon: the macOS wheel ships MPS
+uv run python -m src.app
 ```
 
-On Apple Silicon the default PyPI index is correct and MPS is detected automatically.
+On Apple Silicon, `--extra cpu` installs the standard macOS arm64 PyTorch wheel, which includes Metal (MPS) support; the device is detected automatically.
 
 ## Headless / batch processing
 
 The CLI processes (content, style) pairs without launching the web UI. With no arguments it walks the cartesian product of `examples/content/` × `examples/style/` and writes results to `examples/output/`:
 
 ```shell
-python -m src.cli                                  # examples/content × examples/style → examples/output
-python -m src.cli -c my.jpg -s ref.jpg -o out.webp # single pair to a single file
-python -m src.cli -v canny -p "maximum style"      # variant + preset overrides
-python -m src.cli -b sd15                          # lighter SD 1.5 backend (older / smaller hardware)
+uv run python -m src.cli                                  # examples/content × examples/style → examples/output
+uv run python -m src.cli -c my.jpg -s ref.jpg -o out.webp # single pair to a single file
+uv run python -m src.cli -v canny -p "maximum style"      # variant + preset overrides
+uv run python -m src.cli -b sd15                          # lighter SD 1.5 backend (older / smaller hardware)
+uv run python -m src.cli --smoke-test -b sd15              # verify the pipeline runs here (tiny synthetic inputs)
 ```
 
-Every UI knob is exposed as a flag, see `python -m src.cli --help`. Outputs are named `<backend>-<content>_X_<style>.webp` (e.g. `sdxl-…` or `sd15-…`), the same convention used when downloading from the Gradio app.
+`--smoke-test` runs a single small generation on in-code synthetic images (no `-c`/`-s`/`-o` needed) and prints the device, memory mode, and per-step timing — a quick way to confirm the pipeline works on your hardware, and how slow it'll be, before committing to a real batch. The first run still downloads the chosen backend's weights.
+
+Every UI knob is exposed as a flag, see `uv run python -m src.cli --help`. Outputs are named `<backend>-<content>_X_<style>.webp` (e.g. `sdxl-…` or `sd15-…`), the same convention used when downloading from the Gradio app.
 
 ### Backends
 
@@ -101,6 +102,7 @@ Disk: **~15 GB** for cached models on first run.
 - `src/pipeline.py` - Builds the `StableDiffusionXLControlNetPipeline`, loads InstantStyle weights, applies the depth/canny preprocessor, runs inference. Attention runs on torch 2.x SDPA - no xFormers required on either CUDA or MPS. **Lazy-loaded** - first call triggers ~15 GB of Hugging Face Hub downloads and a few seconds of CUDA init.
 - `src/image_utils.py` - PIL preprocessing (EXIF orientation, RGB convert, resize so dimensions are multiples of 8 for the VAE) and the shared `output_filename()` helper.
 - `src/_quiet.py` - Shared warning-filter setup, imported first by both entrypoints to silence known-harmless upstream noise before the pipeline loads.
+- `tests/` - Fast no-download unit tests for the preprocessing helpers and pipeline config (`uv run pytest`, ~4 s). The live model path is exercised separately by `python -m src.cli --smoke-test`.
 
 ### Model cache behaviour
 
