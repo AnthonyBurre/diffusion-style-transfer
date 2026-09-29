@@ -15,6 +15,7 @@ from .pipeline import (
     NEGATIVE_PROMPT_DEFAULT,
     PRESETS,
     StylePipeline,
+    sampling_defaults,
 )
 
 PREVIEW_HEIGHT = 320
@@ -47,7 +48,7 @@ def stylise(
     content_img = prepare_content_image(Image.open(content_path), max_size=int(max_size))
     style_img = prepare_style_image(Image.open(style_path))
 
-    seed = int(seed) if seed is not None else -1
+    seed = None if seed is None or seed < 0 else int(seed)
 
     try:
         result = _pipeline.generate(
@@ -59,34 +60,35 @@ def stylise(
             controlnet_scale=controlnet_scale,
             steps=steps,
             guidance_scale=guidance_scale,
-            seed=seed if seed >= 0 else None,
+            seed=seed,
             negative_prompt=negative_prompt,
         )
     except Exception as exc:  # noqa: BLE001 - report in the UI instead of a bare 500
         raise gr.Error(f"Generation failed: {type(exc).__name__}: {exc}")
 
     name = output_filename(
-        Path(content_path).stem, Path(style_path).stem, backend=_pipeline.backend
+        Path(content_path).stem, Path(style_path).stem, backend=_pipeline.label
     )
     out_path = Path(tempfile.mkdtemp()) / name
     result.save(out_path, format="webp", lossless=True)
     return str(out_path)
 
 
-def build_ui(backend: str) -> gr.Blocks:
+def build_ui(pipeline: StylePipeline) -> gr.Blocks:
     default = PRESETS[DEFAULT_PRESET]
-    with gr.Blocks(title=f"Diffusion-based style transfer ({backend})") as demo:
-        gr.Markdown(f"# Diffusion-based artistic style transfer ({backend})")
+    default_steps, default_guidance = sampling_defaults(pipeline.fast)
+    with gr.Blocks(title=f"Diffusion-based style transfer ({pipeline.label})") as demo:
+        gr.Markdown(f"# Diffusion-based artistic style transfer ({pipeline.label})")
         with gr.Row():
             with gr.Column(scale=1):
                 content = gr.Image(
-                    type="filepath", 
+                    type="filepath",
                     label="Content",
                     height=PREVIEW_HEIGHT
                 )
             with gr.Column(scale=1):
                 style = gr.Image(
-                    type="filepath", 
+                    type="filepath",
                     label="Style",
                     height=PREVIEW_HEIGHT
                 )
@@ -116,12 +118,15 @@ def build_ui(backend: str) -> gr.Blocks:
                         label="ControlNet conditioning scale",
                     )
                     max_size = gr.Slider(
-                        512, 1024, value=BACKENDS[backend].default_max_size, step=64,
+                        512, 1024, value=BACKENDS[pipeline.backend].default_max_size, step=64,
                         label="Max output side (px)",
                     )
-                    steps = gr.Slider(10, 60, value=30, step=1, label="Inference steps")
+                    steps = gr.Slider(
+                        1, 60, value=default_steps, step=1, label="Inference steps",
+                    )
                     guidance_scale = gr.Slider(
-                        1.0, 15.0, value=5.0, step=0.5, label="Guidance scale",
+                        1.0, 15.0, value=default_guidance, step=0.5,
+                        label="Guidance scale",
                     )
                     seed = gr.Number(value=-1, precision=0, label="Seed (-1 = random)")
                     negative_prompt = gr.Textbox(
@@ -157,11 +162,16 @@ def main() -> None:
              "'sd15' is the lightweight option for older / smaller hardware "
              "(~4 GB VRAM, faster, lower fidelity) (default: %(default)s)",
     )
+    parser.add_argument(
+        "--fast", action="store_true",
+        help="load an LCM-LoRA for few-step sampling (defaults: 6 steps, "
+             "guidance 1.0); several times faster, somewhat softer detail",
+    )
     args = parser.parse_args()
 
     global _pipeline
-    _pipeline = StylePipeline(backend=args.backend)
-    build_ui(args.backend).launch(server_name="0.0.0.0", server_port=7860)
+    _pipeline = StylePipeline(backend=args.backend, fast=args.fast)
+    build_ui(_pipeline).launch(server_name="0.0.0.0", server_port=7860)
 
 
 if __name__ == "__main__":
