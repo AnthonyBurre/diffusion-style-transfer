@@ -11,16 +11,14 @@ either an output file (single-pair only) or an output directory.
 
 ``--backend`` selects the diffusion base model: ``sdxl`` (default, ~12 GB
 VRAM) or ``sd15`` (lighter, faster, for older / smaller hardware).
-
-Sibling of ``src.app`` (the Gradio UI); the two share the pipeline and
-preprocessing modules but not dispatch code, so UI changes can't ripple
-into the CLI.
+``--fast`` adds an LCM-LoRA for few-step sampling on either backend.
 """
 from . import _quiet  # noqa: F401  -- installs warning filters before pipeline import
 
 import argparse
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -33,6 +31,7 @@ from .pipeline import (
     NEGATIVE_PROMPT_DEFAULT,
     PRESETS,
     StylePipeline,
+    sampling_defaults,
     total_memory_bytes,
 )
 
@@ -55,6 +54,23 @@ def _resolve_inputs(path):
             sys.exit(f"error: no image files in {p}")
         return files
     sys.exit(f"error: path not found: {p}")
+
+
+def _report_setup(pipeline, prefix=""):
+    mem = total_memory_bytes(pipeline.device)
+    mem_str = "?" if mem is None else f"{mem / 1024**3:.0f} GB"
+    sys.stderr.write(
+        f"{prefix}device={pipeline.device}  memory={mem_str}  "
+        f"backend={pipeline.backend}  fast={'on' if pipeline.fast else 'off'}  "
+        f"offload={'on' if pipeline.memory_constrained else 'off'}\n"
+    )
+    if pipeline.memory_constrained and pipeline.backend == "sdxl":
+        sys.stderr.write(
+            f"{prefix}note: SDXL streams weights via sequential CPU offload on this "
+            "device — it works, but expect a long wait per image. --fast and/or "
+            "--backend sd15 are quicker.\n"
+        )
+    sys.stderr.flush()
 
 
 def _save(result, out_path):
@@ -96,20 +112,14 @@ def run(args):
         args.max_size if args.max_size is not None
         else BACKENDS[args.backend].default_max_size
     )
-
-    pipeline = StylePipeline(backend=args.backend)
-    mem_gb = total_memory_bytes(pipeline.device) / 1024**3
-    sys.stderr.write(
-        f"device={pipeline.device}  memory={mem_gb:.0f} GB  backend={args.backend}  "
-        f"offload={'on' if pipeline.memory_constrained else 'off'}\n"
+    default_steps, default_guidance = sampling_defaults(args.fast)
+    steps = args.steps if args.steps is not None else default_steps
+    guidance_scale = (
+        args.guidance_scale if args.guidance_scale is not None else default_guidance
     )
-    if pipeline.memory_constrained and args.backend == "sdxl":
-        sys.stderr.write(
-            "warning: SDXL on a memory-constrained device streams weights via "
-            "sequential CPU offload — expect minutes per image; --backend sd15 "
-            "is far faster here.\n"
-        )
-    sys.stderr.flush()
+
+    pipeline = StylePipeline(backend=args.backend, fast=args.fast)
+    _report_setup(pipeline)
 
     # Prepared once: each style is reused across every content image.
     prepared_styles = [
@@ -127,7 +137,7 @@ def run(args):
             sys.stderr.flush()
 
             out_path = out if is_file_output else out / output_filename(
-                content_path.stem, style_path.stem, backend=args.backend
+                content_path.stem, style_path.stem, backend=pipeline.label
             )
             try:
                 result = pipeline.generate(
@@ -137,8 +147,8 @@ def run(args):
                     controlnet_variant=args.controlnet_variant,
                     ip_adapter_weight=ip_adapter_weight,
                     controlnet_scale=controlnet_scale,
-                    steps=args.steps,
-                    guidance_scale=args.guidance_scale,
+                    steps=steps,
+                    guidance_scale=guidance_scale,
                     seed=seed,
                     negative_prompt=args.negative_prompt,
                 )
@@ -146,12 +156,6 @@ def run(args):
             except Exception as exc:  # noqa: BLE001 - one bad pair shouldn't abort the batch
                 failures += 1
                 sys.stderr.write(f"  FAILED {label}: {type(exc).__name__}: {exc}\n")
-                sys.stderr.flush()
-                continue
-
-            if not out_path.exists() or out_path.stat().st_size == 0:
-                failures += 1
-                sys.stderr.write(f"  FAILED {label}: no output file written\n")
                 sys.stderr.flush()
                 continue
 
@@ -186,17 +190,15 @@ def _synthetic_images() -> tuple[Image.Image, Image.Image]:
 def _smoke_test(args) -> None:
     """Run one tiny generation on synthetic inputs to verify the pipeline works
     on this machine. Exits non-zero with a clear message on any failure."""
-    import time
+    content_raw, style_raw = _synthetic_images()
+    content = prepare_content_image(content_raw, max_size=SMOKE_TEST_SIZE)
+    style = prepare_style_image(style_raw)
 
-    content = prepare_content_image(_synthetic_images()[0], max_size=SMOKE_TEST_SIZE)
-    style = prepare_style_image(_synthetic_images()[1])
-
-    pipeline = StylePipeline(backend=args.backend)
-    mem_gb = total_memory_bytes(pipeline.device) / 1024**3
+    pipeline = StylePipeline(backend=args.backend, fast=args.fast)
     preset = PRESETS[DEFAULT_PRESET]
+    _, guidance_scale = sampling_defaults(args.fast)
+    _report_setup(pipeline, prefix="smoke-test: ")
     sys.stderr.write(
-        f"smoke-test: device={pipeline.device}  memory={mem_gb:.0f} GB  "
-        f"backend={args.backend}  offload={'on' if pipeline.memory_constrained else 'off'}\n"
         f"smoke-test: {SMOKE_TEST_SIZE}px synthetic inputs, {args.controlnet_variant} "
         f"conditioning, {SMOKE_TEST_STEPS} steps "
         f"(first run downloads the {args.backend} weights)\n"
@@ -213,23 +215,24 @@ def _smoke_test(args) -> None:
             ip_adapter_weight=preset["ip_adapter_weight"],
             controlnet_scale=preset["controlnet_scale"],
             steps=SMOKE_TEST_STEPS,
-            guidance_scale=5.0,
+            guidance_scale=guidance_scale,
             seed=0,
             negative_prompt=NEGATIVE_PROMPT_DEFAULT,
         )
     except Exception as exc:  # noqa: BLE001 - report clearly and signal failure
         sys.stderr.write(f"SMOKE TEST FAILED: {type(exc).__name__}: {exc}\n")
         if pipeline.memory_constrained and args.backend == "sdxl":
-            sys.stderr.write("hint: SDXL is heavy here — retry with `--smoke-test -b sd15`.\n")
+            sys.stderr.write(
+                "hint: SDXL is heavy here — `-b sd15` needs far less memory.\n"
+            )
         sys.exit(1)
 
     elapsed = time.perf_counter() - start
-    out_path = Path(tempfile.mkdtemp()) / f"selftest-{args.backend}.webp"
+    out_path = Path(tempfile.mkdtemp()) / f"selftest-{pipeline.label}.webp"
     result.save(out_path, format="webp", lossless=True)
-    sys.stderr.write(
-        f"SMOKE TEST PASSED in {elapsed:.0f}s "
-        f"(~{elapsed / SMOKE_TEST_STEPS:.1f}s/step); wrote {out_path}\n"
-    )
+    # Total includes model loading and the first (warm-up) step, so it isn't
+    # divided into a per-step figure; the progress bar above shows step times.
+    sys.stderr.write(f"SMOKE TEST PASSED in {elapsed:.0f}s; wrote {out_path}\n")
 
 
 def main():
@@ -280,8 +283,19 @@ def main():
         "--max-size", type=int, default=None,
         help="max output side in px (default: 1024 for sdxl, 512 for sd15)",
     )
-    parser.add_argument("--steps", type=int, default=30, help="diffusion inference steps")
-    parser.add_argument("--guidance-scale", type=float, default=5.0, help="classifier-free guidance scale")
+    parser.add_argument(
+        "--fast", action="store_true",
+        help="load an LCM-LoRA and sample in a few steps with CFG off: several "
+             "times faster, somewhat softer detail; negative prompt is ignored",
+    )
+    parser.add_argument(
+        "--steps", type=int, default=None,
+        help="diffusion inference steps (default: 30, or 6 with --fast)",
+    )
+    parser.add_argument(
+        "--guidance-scale", type=float, default=None,
+        help="classifier-free guidance scale (default: 5.0, or 1.0 with --fast)",
+    )
     parser.add_argument("--seed", type=int, default=-1, help="seed; -1 = random")
     parser.add_argument(
         "--negative-prompt", default=NEGATIVE_PROMPT_DEFAULT,
@@ -291,7 +305,7 @@ def main():
         "--smoke-test", action="store_true",
         help="verify the pipeline runs on this machine: one tiny generation on "
              "in-code synthetic images (ignores -c/-s/-o). First run downloads "
-             "the chosen backend's weights; pair with '-b sd15' on small hardware.",
+             "the chosen backend's weights.",
     )
     args = parser.parse_args()
 

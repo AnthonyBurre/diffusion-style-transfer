@@ -1,7 +1,7 @@
 [project]
 name = "diffusion-style-transfer"
 version = "0.1.0"
-description = "Diffusion-based artistic style transfer (SDXL + InstantStyle + ControlNet-Depth) behind a Gradio UI and CLI."
+description = "Diffusion-based artistic style transfer (SDXL or SD 1.5 + IP-Adapter + ControlNet) behind a Gradio UI and CLI."
 requires-python = ">=3.11,<3.13"
 dependencies = [
     "gradio==6.14.0",
@@ -13,7 +13,7 @@ dependencies = [
     "peft==0.19.1",
     "pillow==12.2.0",
     "numpy==2.4.4",
-    "safetensors==0.8.0rc0",
+    "safetensors==0.8.0",
     "timm==1.0.26",
 ]
 

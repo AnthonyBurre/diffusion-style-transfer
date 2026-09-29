@@ -28,7 +28,7 @@ COPY src/ src/
 RUN uv sync --frozen --no-dev --extra cuda
 
 # Weights land in the standard Hugging Face cache; mount the host cache here so
-# the ~15 GB first-run download is not repeated on every container start.
+# the first-run download (~15 GB for SDXL) is not repeated on every container start.
 ENV HF_HOME=/app/.cache/huggingface
 RUN mkdir -p /app/.cache/huggingface && chown -R appuser:appgroup /app/.cache
 
@@ -36,12 +36,13 @@ ENV PATH="/app/.venv/bin:$PATH"
 USER appuser
 EXPOSE 7860
 
-# start-period is generous: the first request triggers the ~15 GB model download.
-HEALTHCHECK --interval=60s --timeout=5s --start-period=300s --retries=3 \
+# Weights load lazily on the first generation, so the UI answers as soon as
+# Gradio is up; start-period only has to cover the torch/diffusers import.
+HEALTHCHECK --interval=60s --timeout=5s --start-period=60s --retries=3 \
     CMD python -c "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:7860/', timeout=3).status == 200 else 1)"
 
 # Default to the Gradio web UI; override CMD to run the headless CLI:
-#   docker run … style-transfer-diffusion src.cli -c … -s … -o … -b sdxl
+#   docker run … style-transfer-diffusion src.cli -c … -s … -o … -b sdxl --fast
 # `python -u` keeps stdout/stderr unbuffered so Docker logs are live.
 ENTRYPOINT ["python", "-u", "-m"]
 CMD ["src.app"]

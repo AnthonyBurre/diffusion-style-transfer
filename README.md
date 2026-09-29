@@ -2,7 +2,7 @@
 
 A Gradio web app for image-to-image artistic style transfer using diffusion models. Sibling project to [`image-style-transfer`](https://github.com/AnthonyBurre/image-style-transfer) - same UX, fundamentally different approach and system requirements (GPU + ~15 GB of model weights).
 
-Stable Diffusion XL (SDXL) is comfortable with ~12 GB VRAM and takes tens of seconds per image even on a recent GPU. This project assumes a CUDA-capable GPU (or Apple Silicon MPS as a slower fallback).
+Stable Diffusion XL (SDXL) is comfortable with ~12 GB VRAM and takes tens of seconds per image even on a recent GPU. A CUDA GPU is the smoothest path, but smaller machines are supported too: a lighter SD 1.5 backend, a few-step `--fast` mode, and automatic CPU offload all trade speed or fidelity for lower memory (see [Hardware](#hardware)).
 
 ## Run with Docker (CUDA)
 
@@ -24,7 +24,7 @@ If Docker isn't an option, run directly on the host with [uv](https://docs.astra
 ```shell
 uv sync --extra cuda      # Linux / Windows with an NVIDIA GPU (CUDA 12.6 wheels)
 uv sync --extra cpu       # CPU-only — or Apple Silicon: the macOS wheel ships MPS
-uv run python -m src.app
+uv run python -m src.app              # add -b sd15 and/or --fast for smaller hardware
 ```
 
 On Apple Silicon, `--extra cpu` installs the standard macOS arm64 PyTorch wheel, which includes Metal (MPS) support; the device is detected automatically.
@@ -38,18 +38,22 @@ uv run python -m src.cli                                  # examples/content × 
 uv run python -m src.cli -c my.jpg -s ref.jpg -o out.webp # single pair to a single file
 uv run python -m src.cli -v canny -p "maximum style"      # variant + preset overrides
 uv run python -m src.cli -b sd15                          # lighter SD 1.5 backend (older / smaller hardware)
-uv run python -m src.cli --smoke-test -b sd15              # verify the pipeline runs here (tiny synthetic inputs)
+uv run python -m src.cli --fast                           # LCM-LoRA: ~6 steps instead of 30
+uv run python -m src.cli --smoke-test -b sd15             # verify the pipeline runs here (tiny synthetic inputs)
 ```
 
 `--smoke-test` runs a single small generation on in-code synthetic images (no `-c`/`-s`/`-o` needed) and prints the device, memory mode, and per-step timing — a quick way to confirm the pipeline works on your hardware, and how slow it'll be, before committing to a real batch. The first run still downloads the chosen backend's weights.
 
-Every UI knob is exposed as a flag, see `uv run python -m src.cli --help`. Outputs are named `<backend>-<content>_X_<style>.webp` (e.g. `sdxl-…` or `sd15-…`), the same convention used when downloading from the Gradio app.
+Every UI knob is exposed as a flag, see `uv run python -m src.cli --help`. Outputs are named `<backend>-<content>_X_<style>.webp` (e.g. `sdxl-…`, `sd15-…`, or `sdxl-lcm-…` with `--fast`), the same convention used when downloading from the Gradio app.
 
 ### Backends
 
-1.`--backend sdxl` (default) is the flagship: SDXL + InstantStyle + ControlNet, ~12 GB VRAM, native 1024 px. 
+1. `--backend sdxl` (default) is the flagship: SDXL + InstantStyle + ControlNet, ~12 GB VRAM, native 1024 px.
+2. `--backend sd15` swaps in Stable Diffusion 1.5 with the SD1.5 ControlNet v1.1 + IP-Adapter SD1.5 weights — ~3-4 GB VRAM, native 512 px (auto-applied as `--max-size` default), and much less work per image (a quarter of the pixels on a smaller U-Net). The trade is lower stylisation fidelity and more semantic bleed from the style image: the SD1.5 path applies a flat IP-Adapter scale rather than InstantStyle's per-block targeting used on SDXL.
 
-2.`--backend sd15` swaps in Stable Diffusion 1.5 with the SD1.5 ControlNet v1.1 + IP-Adapter SD1.5 weights — ~3-4 GB VRAM, native 512 px (auto-applied as `--max-size` default), roughly 4-6× faster per image. The trade is lower stylisation fidelity and slightly more semantic bleed from the style image (the SD1.5 path applies a flat IP-Adapter scale rather than the per-block InstantStyle disentanglement used on SDXL).
+### Fast mode
+
+`--fast` (CLI and app) works with either backend. It loads the matching [LCM-LoRA](https://huggingface.co/latent-consistency/lcm-lora-sdxl) (`lcm-lora-sdxl` / `lcm-lora-sdv1-5`, ~100-400 MB) and switches to the LCM scheduler, so sampling takes ~6 steps instead of 30. It also defaults guidance to 1.0, which disables classifier-free guidance and halves the U-Net work per step. The negative prompt has no effect in this mode. Expect somewhat softer detail than a full 30-step run. It's the best option on slow hardware, and a quick way to preview settings before a full render.
 
 ## Background
 
@@ -67,39 +71,41 @@ For the mechanics of forward/reverse diffusion:
 
 ### Conditioning
 
-Stable Diffusion is primarily a text-to-image model: at every denoising step the network reads a CLIP-style text embedding and steers toward an image consistent with the prompt. Image conditioning was added later as adapter modules. ControlNet adds a parallel branch that consumes a spatial control signal - a depth map or an edge map - and injects it into the U-Net's residual blocks. IP-Adapter (and its style-specialised variant InstantStyle) extracts CLIP image features from a reference image and feeds them through learned cross-attention layers. Both are translators that convert images into the same kind of conditioning vector the network already knows how to listen to.
+Stable Diffusion is primarily a text-to-image model: at every denoising step the network reads a CLIP-style text embedding and steers toward an image consistent with the prompt. Image conditioning was added later as adapter modules, and the two used here enter the network differently. ControlNet is a trainable copy of the U-Net's encoder that consumes a spatial control signal - a depth map or an edge map - and adds its outputs to the U-Net's skip connections, so it constrains *where* things go. IP-Adapter extracts CLIP image features from a reference image and feeds them through extra cross-attention layers alongside the text, so it acts like an image-valued prompt that steers *what things look like*. InstantStyle restricts IP-Adapter to the U-Net blocks that carry style.
 
 In this pipeline three conditioning signals - the optional text prompt, the depth map of the content image, and the InstantStyle features of the style image - pull on every one of the ~30 denoising steps simultaneously.
 
 
 ## Method
 
-Single inference path: **SDXL base + InstantStyle (style conditioning) + ControlNet-Depth (content conditioning)**.
+Default path: **SDXL base + InstantStyle (style conditioning) + ControlNet-Depth (content conditioning)**. The SD 1.5 backend has the same structure with SD1.5 weights and plain IP-Adapter (see [Backends](#backends)).
 
 - **Base model**: `stabilityai/stable-diffusion-xl-base-1.0`. SDXL outperforms SD 1.5 for stylisation fidelity and has the most current adapter ecosystem. Paired with the community-fixed VAE `madebyollin/sdxl-vae-fp16-fix` because SDXL's stock VAE produces NaNs in fp16.
 - **Style conditioning**: [InstantStyle](https://github.com/InstantStyle/InstantStyle), an IP-Adapter variant explicitly tuned to disentangle style from semantic content. Without it, plain IP-Adapter tends to copy *objects* from the style image, not just texture/colour.
 - **Content conditioning**: ControlNet-Depth (`diffusers/controlnet-depth-sdxl-1.0`). Depth maps preserve overall composition without copying low-level patterns from the content image. Maps are produced by `Intel/dpt-hybrid-midas` (DPT-Hybrid), the balanced quality/speed choice from `controlnet-aux`. ControlNet-Canny is offered as an alternative when the user wants edges preserved more literally.
 
-A diffusion sampling loop (~30 steps) generates the final image.
+A diffusion sampling loop (30 steps, or ~6 with `--fast`) generates the final image.
 
 ## Hardware
 
-| Setup | VRAM | Per-image latency | Notes |
-|---|---|---|---|
-| 8 GB GPU | 8 GB | ~2 min | Sequential CPU offload kicks in automatically (10 GB VRAM threshold) |
-| 12+ GB GPU | 12 GB | ~15-30 s | Recommended baseline |
-| 24 GB GPU | 24 GB | ~10 s | Comfortable; can run higher resolutions / bigger batches |
-| Apple Silicon (MPS) | unified | ~30-60 s on M4 Max | Works via `diffusers` MPS backend. Base M2 chips are 20-30× slower (~25 min/image) and not recommended. |
-| CPU only | n/a | 5+ min | Technically works, not recommended |
+Any of these can run the pipeline; they differ in how long you wait. CPU offload switches on automatically below 12 GB of VRAM (CUDA) or 16 GB of unified memory (Apple Silicon), trading speed for fitting in memory. Use `--smoke-test` to see the per-step time on your own machine.
 
-Disk: **~15 GB** for cached models on first run.
+| Setup | What to expect |
+|---|---|
+| CUDA GPU, 12+ GB | SDXL runs fully on-device; the smoothest experience. |
+| CUDA GPU, < 12 GB | Offload kicks in. SDXL streams weights and is slow; `-b sd15` and/or `--fast` help a lot. |
+| Apple Silicon, 16+ GB | Runs on-device via MPS. |
+| Apple Silicon, 8 GB (e.g. base M2) | Both backends complete via offload, but slowly: SD 1.5 at 512 px / 30 steps measured ~55 min per image, and SDXL longer. `--fast` cuts the step count ~5×. |
+| CPU only | Works in fp32; slowest option. |
+
+Disk: **~15 GB** of cached models for SDXL on first run, less for SD 1.5.
 
 
 ## Architecture
 
-- `src/app.py` - Gradio UI. Inputs side-by-side on top; controls (preset, ControlNet variant, advanced sliders) lower-left; output lower-right. Saves each result to a tempdir as `sdxl-<content>_X_<style>.webp` and returns the path so the browser download has a meaningful name.
+- `src/app.py` - Gradio UI. Backend and `--fast` are fixed at launch. Inputs side-by-side on top; controls (preset, ControlNet variant, advanced sliders) lower-left; output lower-right. Saves each result to a tempdir as `<backend>-<content>_X_<style>.webp` and returns the path so the browser download has a meaningful name.
 - `src/cli.py` - Headless batch driver. Cartesian product over `examples/content/` × `examples/style/` by default; same naming convention as the app. Every UI knob is a flag.
-- `src/pipeline.py` - Builds the `StableDiffusionXLControlNetPipeline`, loads InstantStyle weights, applies the depth/canny preprocessor, runs inference. Attention runs on torch 2.x SDPA - no xFormers required on either CUDA or MPS. **Lazy-loaded** - first call triggers ~15 GB of Hugging Face Hub downloads and a few seconds of CUDA init.
+- `src/pipeline.py` - Backend configs, and `StylePipeline`, which builds the ControlNet pipeline for the chosen backend, loads IP-Adapter (plus the LCM-LoRA in fast mode), applies the depth/canny preprocessor, and runs inference. The base pipeline is built once; switching depth/canny swaps only the ControlNet. Attention runs on torch 2.x SDPA - no xFormers required on either CUDA or MPS. **Lazy-loaded** - the first generation triggers the Hugging Face Hub downloads.
 - `src/image_utils.py` - PIL preprocessing (EXIF orientation, RGB convert, resize so dimensions are multiples of 8 for the VAE) and the shared `output_filename()` helper.
 - `src/_quiet.py` - Shared warning-filter setup, imported first by both entrypoints to silence known-harmless upstream noise before the pipeline loads.
 - `tests/` - Fast no-download unit tests for the preprocessing helpers and pipeline config (`uv run pytest`, ~4 s). The live model path is exercised separately by `python -m src.cli --smoke-test`.
@@ -125,13 +131,13 @@ The GUI exposes named presets which map to fixed combinations of IP-Adapter weig
 | Parameter | Range | Default | Notes |
 |---|---|---|---|
 | Content conditioning | depth / canny | depth | Depth preserves composition; canny preserves edges literally. |
-| IP-Adapter weight | 0.0-1.5 | preset-driven (0.8) | Higher = more style. Applied via InstantStyle's deep-block-only schedule. |
+| IP-Adapter weight | 0.0-1.5 | preset-driven (0.8) | Higher = more style. On SDXL, applied only to InstantStyle's style block; on SD 1.5, applied uniformly. |
 | ControlNet conditioning scale | 0.0-1.5 | preset-driven (0.6) | Higher = stricter content adherence. |
-| Max output side (px) | 512-1024 | 1024 | SDXL is trained at 1024; below ~768 quality drops. Above 1024 needs tiling. |
-| Inference steps | 10-60 | 30 | Diminishing returns past 30-40. |
-| Guidance scale | 1.0-15.0 | 5.0 | Lower than typical text-to-image since image conditioning already pulls hard. |
+| Max output side (px) | 512-1024 | 1024 (SDXL) / 512 (SD 1.5) | Each backend is trained at its default; far below it quality drops. |
+| Inference steps | 1-60 | 30 (6 with `--fast`) | Diminishing returns past 30-40; fast mode works in 4-8. |
+| Guidance scale | 1.0-15.0 | 5.0 (1.0 with `--fast`) | Lower than typical text-to-image since image conditioning already pulls hard. 1.0 disables CFG. |
 | Seed | int, -1 = random | -1 | Reproducibility. |
-| Negative prompt | text | `"blurry, low quality, distorted"` | Editable, including down to empty. |
+| Negative prompt | text | `"blurry, low quality, distorted"` | Editable, including down to empty. Ignored when guidance is 1.0. |
 
 ## Roadmap
 
